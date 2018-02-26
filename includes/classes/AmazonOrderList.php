@@ -219,10 +219,11 @@ class AmazonOrderList extends AmazonOrderCore implements Iterator{
         }
 
         //reset to store's default marketplace
-        if (file_exists($this->config)){
-            include($this->config);
+        $storeMP = $this->config->getStoreMarketPlace($this->storeName);
+        if(empty($storeMP)){
+            $this->log("Marketplace ID is missing",'Urgent');
         } else {
-            throw new Exception('Config file does not exist!');
+            $this->options['MarketplaceId.Id.1'] = $storeMP;
         }
         if(isset($store[$this->storeName]) && array_key_exists('marketplaceId', $store[$this->storeName])){
             $this->options['MarketplaceId.Id.1'] = $store[$this->storeName]['marketplaceId'];
@@ -495,7 +496,7 @@ class AmazonOrderList extends AmazonOrderCore implements Iterator{
                 break;
             }
             $this->orderList[$this->index] = new AmazonOrder($this->storeName,null,$data,$this->mockMode,$this->mockFiles,$this->config);
-            $this->orderList[$this->index]->setLogPath($this->logpath);
+            $this->orderList[$this->index]->setLogPath($this->config->getLogFile());
             $this->orderList[$this->index]->mockIndex = $this->mockIndex;
             $this->index++;
         }

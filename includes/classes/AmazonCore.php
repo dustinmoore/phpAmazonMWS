@@ -99,11 +99,11 @@ abstract class AmazonCore{
     protected $throttleStop = false;
     protected $storeName;
     protected $options;
+    /** @var  AmazonMWSConfig */
     protected $config;
     protected $mockMode = false;
     protected $mockFiles;
     protected $mockIndex = 0;
-    protected $logpath;
     protected $env;
     protected $rawResponses = array();
     protected $disableSslVerify = false;
@@ -127,11 +127,19 @@ abstract class AmazonCore{
      * @param string $config [optional] <p>An alternate config file to set. Used for testing.</p>
      */
     protected function __construct($s = null, $mock = false, $m = null, $config = null){
-        if (is_null($config)){
-            $config = __DIR__.'/../../amazon-config.php';
+        /** If the store argument is an array, then assume its the entire config being passed in */
+        if ($s instanceof \AmazonMWSConfig) {
+            // New config object passed in, use it.
+            $this->setConfig($s);
         }
-        $this->setConfig($config);
-        $this->setStore($s);
+        else {
+            if (is_null($config)){
+                $config = __DIR__.'/../../amazon-config.php';
+            }
+            $config = new \AmazonMWSConfig($config);
+            $this->setConfig($config->getConfigFor($s));
+            $this->setStore($s);
+        }
         $this->setMock($mock,$m);
         
         $this->env=__DIR__.'/../../environment.php';
@@ -347,101 +355,93 @@ abstract class AmazonCore{
             return false;
         }
     }
-    
+
     /**
      * Set the config file.
-     * 
+     *
      * This method can be used to change the config file after the object has
      * been initiated. The file will not be set if it cannot be found or read.
      * This is useful for testing, in cases where you want to use a different file.
-     * @param string $path <p>The path to the config file.</p>
+     * @param string|\AmazonMWSConfig $config <p>The path to the config file.</p>
      * @throws Exception If the file cannot be found or read.
      */
-    public function setConfig($path){
-        if (file_exists($path) && is_readable($path)){
-            include($path);
-            $this->config = $path;
-            $this->setLogPath($logpath);
-            if (isset($AMAZON_SERVICE_URL)) {
-                $this->urlbase = rtrim($AMAZON_SERVICE_URL, '/') . '/';
+    public function setConfig($config){
+        if ($config instanceof \AmazonMWSConfig) {
+            $this->config = $config;
+        }
+        else {
+            if (file_exists($config) && is_readable($config)){
+                $this->config = new \AmazonMWSConfig($config);
+            } else {
+                throw new Exception("Config file does not exist or cannot be read! ($config)");
             }
-        } else {
-            throw new Exception("Config file does not exist or cannot be read! ($path)");
+        }
+        $this->urlbase = $config->getEndPoint();
+        // If the current storeName doesn't exist in the stores array any more, reset it to the first in the list of stores
+        if (empty($this->storeName) OR ($this->config->storeExists($this->storeName) === false)) {
+            $this->setStore(); // Passing no argument defaults it to the first store.
         }
     }
-    
+
     /**
      * Set the log file path.
-     * 
+     *
      * Use this method to change the log file used. This method is called
      * each time the config file is changed.
      * @param string $path <p>The path to the log file.</p>
-     * @throws Exception If the file cannot be found or read.
      */
     public function setLogPath($path){
-        if (!file_exists($path)){
-            touch($path);
-        }
-
-        if (file_exists($path) && is_readable($path)){
-            $this->logpath = $path;
-        } else {
-            throw new Exception("Log file does not exist or cannot be read! ($path)");
-        }
-        
+        // We move the validation from here into the Config object to save on duplication.
+        // Its also automatically enables logging when set.
+        $this->config->setLogFile($path);
     }
-    
+
     /**
      * Sets the store values.
-     * 
+     *
      * This method sets a number of key values from the config file. These values
      * include your Merchant ID, Access Key ID, and Secret Key, and are critical
      * for making requests with Amazon. If the store cannot be found in the
      * config file, or if any of the key values are missing,
      * the incident will be logged.
-     * @param string $s [optional] <p>The store name to look for.
+     * @param string $storeName [optional] <p>The store name to look for.
      * This parameter is not required if there is only one store defined in the config file.</p>
      * @throws Exception If the file can't be found.
      */
-    public function setStore($s=null){
-        if (file_exists($this->config)){
-            include($this->config);
-        } else {
-            throw new Exception("Config file does not exist!");
-        }
-        
-        if (empty($store) || !is_array($store)) {
+    public function setStore($storeName = null){
+        if ($this->config->getStoreCount() === 0) {
             throw new Exception("No stores defined!");
         }
-        
-        if (!isset($s) && count($store)===1) {
-            $s=key($store);
+        // If no store name is passed, default it to the first store.
+        if (empty($storeName)) {
+            $storeName = key($this->config->getStores());
         }
-        
-        if(array_key_exists($s, $store)){
-            $this->storeName = $s;
-            if(array_key_exists('merchantId', $store[$s])){
-                $this->options['SellerId'] = $store[$s]['merchantId'];
+
+        if(array_key_exists($storeName, $this->config->getStores())){
+            $this->storeName = $storeName;
+            $store = $this->config->getStore($storeName);
+            if(array_key_exists('merchantId', $store)){
+                $this->options['SellerId'] = $store['merchantId'];
             } else {
                 $this->log("Merchant ID is missing!",'Warning');
             }
-            if(array_key_exists('keyId', $store[$s])){
-                $this->options['AWSAccessKeyId'] = $store[$s]['keyId'];
+            if(array_key_exists('keyId', $store)){
+                $this->options['AWSAccessKeyId'] = $store['keyId'];
             } else {
                 $this->log("Access Key ID is missing!",'Warning');
             }
-            if(!array_key_exists('secretKey', $store[$s])){
+            if(!array_key_exists('secretKey', $store)){
                 $this->log("Secret Key is missing!",'Warning');
             }
-            if (!empty($store[$s]['serviceUrl'])) {
-                $this->urlbase = $store[$s]['serviceUrl'];
+            if (!empty($store['serviceUrl'])) {
+                $this->urlbase = $store['serviceUrl'];
             }
-            if (!empty($store[$s]['MWSAuthToken'])) {
-                $this->options['MWSAuthToken'] = $store[$s]['MWSAuthToken'];
+            if (!empty($store['MWSAuthToken'])) {
+                $this->options['MWSAuthToken'] = $store['MWSAuthToken'];
             }
-            
+
         } else {
-            $this->log("Store $s does not exist!",'Warning');
+            $this->log("Store $storeName does not exist!",'Warning');
         }
     }
     
@@ -455,10 +455,10 @@ abstract class AmazonCore{
     public function setThrottleStop($b=true) {
         $this->throttleStop=!empty($b);
     }
-    
+
     /**
      * Writes a message to the log.
-     * 
+     *
      * This method adds a message line to the log file defined by the config.
      * This includes the priority level, user IP, and a backtrace of the call.
      * @param string $msg <p>The message to write to the log.</p>
@@ -472,61 +472,53 @@ abstract class AmazonCore{
     protected function log($msg, $level = 'Info'){
         if ($msg != false) {
             $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS);
-            
-            if (file_exists($this->config)){
-                include($this->config);
-            } else {
-                throw new Exception("Config file does not exist!");
-            }
-            if (isset($logfunction) && $logfunction != '' && function_exists($logfunction)){
+            $logCallback = $this->config->getLogCallback();
+            if (empty($logCallback) === false){
                 switch ($level){
-                   case('Info'): $loglevel = LOG_INFO; break; 
-                   case('Throttle'): $loglevel = LOG_INFO; break; 
-                   case('Warning'): $loglevel = LOG_NOTICE; break; 
-                   case('Urgent'): $loglevel = LOG_ERR; break; 
-                   default: $loglevel = LOG_INFO;
+                    case('Info'): $loglevel = LOG_INFO; break;
+                    case('Throttle'): $loglevel = LOG_INFO; break;
+                    case('Warning'): $loglevel = LOG_NOTICE; break;
+                    case('Urgent'): $loglevel = LOG_ERR; break;
+                    default: $loglevel = LOG_INFO;
                 }
-                call_user_func($logfunction,$msg,$loglevel);
+                call_user_func($logCallback,$msg,$loglevel);
             }
-            
-            if (isset($muteLog) && $muteLog == true){
-                return;
+
+            $fnPath = $this->config->getLogFile();
+            if (($this->config->isLoggingDisabled()) OR (empty($fnPath))){
+                return null;
             }
-            
-            if(isset($userName) && $userName != ''){ 
-                    $name = $userName;
+
+            if(isset($userName) && $userName != ''){
+                $name = $userName;
             }else{
-                    $name = 'guest';
+                $name = 'guest';
             }
-            
+
             if(isset($backtrace) && isset($backtrace[1]) && isset($backtrace[1]['file']) && isset($backtrace[1]['line']) && isset($backtrace[1]['function'])){
-                    $fileName = basename($backtrace[1]['file']);
-                    $file = $backtrace[1]['file'];
-                    $line = $backtrace[1]['line'];
-                    $function = $backtrace[1]['function'];
+                $fileName = basename($backtrace[1]['file']);
+                $file = $backtrace[1]['file'];
+                $line = $backtrace[1]['line'];
+                $function = $backtrace[1]['function'];
             }else{
-                    $fileName = basename($backtrace[0]['file']);
-                    $file = $backtrace[0]['file'];
-                    $line = $backtrace[0]['line'];
-                    $function = $backtrace[0]['function'];
+                $fileName = basename($backtrace[0]['file']);
+                $file = $backtrace[0]['file'];
+                $line = $backtrace[0]['line'];
+                $function = $backtrace[0]['function'];
             }
             if(isset($_SERVER['REMOTE_ADDR'])){
-                    $ip = $_SERVER['REMOTE_ADDR'];
-                    if($ip == '127.0.0.1')$ip = 'local';//save some char
+                $ip = $_SERVER['REMOTE_ADDR'];
+                if($ip == '127.0.0.1')$ip = 'local';//save some char
             }else{
-                    $ip = 'cli';
+                $ip = 'cli';
             }
-            if (!file_exists($this->logpath)) {
-                //attempt to create the file if it does not exist
-                file_put_contents($this->logpath, "This is the Amazon log, for Amazon classes to use.\n");
-            }
-            if (file_exists($this->logpath) && is_writable($this->logpath)){
-                $str = "[$level][" . date("Y/m/d H:i:s") . " $name@$ip $fileName:$line $function] " . $msg;
-                $fd = fopen($this->logpath, "a+");
+            $str = "[$level][" . date("Y/m/d H:i:s") . " $name@$ip $fileName:$line $function] " . $msg;
+            $fd = fopen($this->config->getLogFile(), "a+");
+            if ($fd !== false) {
                 fwrite($fd,$str . "\r\n");
                 fclose($fd);
             } else {
-                throw new Exception('Error! Cannot write to log! ('.$this->logpath.')');
+                throw new Exception('Error! Cannot write to log! ('.$this->config->getLogFile().')');
             }
         } else {
             return false;
@@ -571,10 +563,10 @@ abstract class AmazonCore{
         return date('Y-m-d\TH:i:sO',$time-120);
             
     }
-    
+
     /**
      * Handles generation of the signed query string.
-     * 
+     *
      * This method uses the secret key from the config file to generate the
      * signed query string.
      * It also handles the creation of the timestamp option prior.
@@ -582,18 +574,13 @@ abstract class AmazonCore{
      * @throws Exception if config file or secret key is missing
      */
     protected function genQuery(){
-        if (file_exists($this->config)){
-            include($this->config);
-        } else {
-            throw new Exception("Config file does not exist!");
-        }
-        
-        if (array_key_exists($this->storeName, $store) && array_key_exists('secretKey', $store[$this->storeName])){
-            $secretKey = $store[$this->storeName]['secretKey'];
+        $store = $this->config->getStore($this->storeName);
+        if (array_key_exists('secretKey', $store)){
+            $secretKey = $store['secretKey'];
         } else {
             throw new Exception("Secret Key is missing!");
         }
-        
+
         unset($this->options['Signature']);
         $this->options['Timestamp'] = $this->genTime();
         $this->options['Signature'] = $this->_signParameters($this->options, $secretKey);
@@ -765,33 +752,30 @@ abstract class AmazonCore{
         }
     }
 
-    //Functions from Athena:
-       /**
-        * Get url or send POST data
-        * @param string $url 
-        * @param array  $param['Header']
-        *               $param['Post']
-        * @return array $return['ok'] 1  - success, (0,-1) - fail
-        *               $return['body']  - response
-        *               $return['error'] - error, if "ok" is not 1
-        *               $return['head']  - http header
-        */
-       function fetchURL ($url, $param) {
+    public function getConfig() {
+        return $this->config;
+    }
+
+    /** Functions from Athena: */
+    /**
+     * Get url or send POST data
+     * @param string $url
+     * @param array  $param['Header']
+     *               $param['Post']
+     * @return array $return['ok'] 1  - success, (0,-1) - fail
+     *               $return['body']  - response
+     *               $return['error'] - error, if "ok" is not 1
+     *               $return['head']  - http header
+     */
+    function fetchURL ($url, $param) {
         $return = array();
-        
         $ch = curl_init();
-        
         curl_setopt($ch,CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch,CURLOPT_TIMEOUT, 0);
         curl_setopt($ch,CURLOPT_FORBID_REUSE, 1);
         curl_setopt($ch,CURLOPT_FRESH_CONNECT, 1);
         curl_setopt($ch,CURLOPT_HEADER, 1);
         curl_setopt($ch,CURLOPT_URL,$url);
-        if ($this->disableSslVerify) {
-            $this->log('Caution: Request being sent without SSL verification.', 'Warning');
-            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-        }
         if (!empty($param)){
             if (!empty($param['Header'])){
                 curl_setopt($ch,CURLOPT_HTTPHEADER, $param['Header']);
@@ -800,60 +784,52 @@ abstract class AmazonCore{
                 curl_setopt($ch,CURLOPT_POSTFIELDS, $param['Post']);
             }
         }
-        
         $data = curl_exec($ch);
         if ( curl_errno($ch) ) {
-                $return['ok'] = -1;
-                $return['error'] = curl_error($ch);
-                return $return;
+            $return['ok'] = -1;
+            $return['error'] = curl_error($ch);
+            return $return;
         }
-        
         if (is_numeric(strpos($data, 'HTTP/1.1 100 Continue'))) {
             $data=str_replace('HTTP/1.1 100 Continue', '', $data);
         }
         $data = preg_split("/\r\n\r\n/",$data, 2, PREG_SPLIT_NO_EMPTY);
         if (!empty($data)) {
-                $return['head'] = ( isset($data[0]) ? $data[0] : null );
-                $return['body'] = ( isset($data[1]) ? $data[1] : null );
+            $return['head'] = ( isset($data[0]) ? $data[0] : null );
+            $return['body'] = ( isset($data[1]) ? $data[1] : null );
         } else {
-                $return['head'] = null;
-                $return['body'] = null;
+            $return['head'] = null;
+            $return['body'] = null;
         }
-        
         $matches = array();
         $data = preg_match("/HTTP\/[0-9.]+ ([0-9]+) (.+)\r\n/",$return['head'], $matches);
         if (!empty($matches)) {
-                $return['code'] = $matches[1];
-                $return['answer'] = $matches[2];
+            $return['code'] = $matches[1];
+            $return['answer'] = $matches[2];
         }
-        
         $data = preg_match("/meta http-equiv=.refresh. +content=.[0-9]*;url=([^'\"]*)/i",$return['body'], $matches);
         if (!empty($matches)) {
-                $return['location'] = $matches[1];
-                $return['code'] = '301';
+            $return['location'] = $matches[1];
+            $return['code'] = '301';
         }
-        
         if ( $return['code'] == '200' || $return['code'] == '302' ) {
-                $return['ok'] = 1;
+            $return['ok'] = 1;
         } else {
-                $return['error'] = (($return['answer'] and $return['answer'] != 'OK') ? $return['answer'] : 'Something wrong!');
-                $return['ok'] = 0;
+            $return['error'] = (($return['answer'] and $return['answer'] != 'OK') ? $return['answer'] : 'Something wrong!');
+            $return['ok'] = 0;
         }
-        
         foreach (preg_split('/\n/', $return['head'], -1, PREG_SPLIT_NO_EMPTY) as $value) {
-                $data = preg_split('/:/', $value, 2, PREG_SPLIT_NO_EMPTY);
-                if (is_array($data) and isset($data['1'])) {
-                        $return['headarray'][$data['0']] = trim($data['1']);
-                }
+            $data = preg_split('/:/', $value, 2, PREG_SPLIT_NO_EMPTY);
+            if (is_array($data) and isset($data['1'])) {
+                $return['headarray'][$data['0']] = trim($data['1']);
+            }
         }
-        
         curl_close($ch);
-        
         return $return;
-       }
+    }
     // End Functions from Athena
-     
-    // Functions from Amazon:
+
+    /** Functions from Amazon: **/
     /**
      * Reformats the provided string using rawurlencode while also replacing ~, copied from Amazon
      * 
@@ -866,18 +842,20 @@ abstract class AmazonCore{
         //Amazon suggests doing this, but it seems to break things rather than fix them:
         //return str_replace('%7E', '~', rawurlencode($value));
     }
-    
+
     /**
      * Fuses all of the parameters together into a string, copied from Amazon
      * @param array $parameters
      * @return string
      */
     protected function _getParametersAsString(array $parameters) {
-        $queryParameters = array();
-        foreach ($parameters as $key => $value) {
-            $queryParameters[] = $key . '=' . $this->_urlencode($value);
-        }
-        return implode('&', $queryParameters);
+//        $queryParameters = array();
+//        foreach ($parameters as $key => $value) {
+//            $queryParameters[] = $key . '=' . $this->_urlencode($value);
+//        }
+//        return implode('&', $queryParameters);
+        // We may as well use the input method!
+        return http_build_query($parameters);
     }
     
     /**
@@ -902,7 +880,7 @@ abstract class AmazonCore{
     /**
      * generates the string to sign, copied from Amazon
      * @param array $parameters
-     * @return type
+     * @return string
      */
     protected function _calculateStringToSignV2(array $parameters) {
         $data = 'POST';
@@ -947,5 +925,3 @@ abstract class AmazonCore{
     // -- End Functions from Amazon --
     
 }
-
-?>
